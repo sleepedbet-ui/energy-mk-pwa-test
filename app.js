@@ -4,11 +4,16 @@
  */
 
 // Базовий URL для API
-// Пріоритет: 1) збережений користувачем Cloudflare Worker у налаштуваннях; 2) відносний шлях /api/...
+// Пріоритет: 1) збережений користувачем Cloudflare Worker у налаштуваннях; 
+// 2) Якщо відкрито на GitHub Pages (github.io) -> проксі на Vercel;
+// 3) Відносний шлях /api/... (для localhost або Vercel)
 function getApiBase() {
   const custom = localStorage.getItem('lightmk_custom_api');
   if (custom && custom.trim()) {
     return custom.trim().replace(/\/$/, '');
+  }
+  if (window.location.hostname.includes('github.io')) {
+    return 'https://energy-mk-pwa-test.vercel.app';
   }
   return '';
 }
@@ -68,6 +73,9 @@ document.addEventListener('DOMContentLoaded', () => {
   // Ініціалізація форми адрес
   initAddressSearch();
   initDiagnostics();
+  initMultiLocations();
+  initCalendarExport();
+  initShareAndNotifications();
 });
 
 /**
@@ -285,17 +293,23 @@ async function loadAllData(forced = false) {
       buildSchedulesMap(schedRes.value);
     }
 
-    // Зберігаємо свіжі дані в LocalStorage як надійний офлайн-кеш
-    const cachePayload = {
-      queuesGpv: state.queuesGpv,
-      queuesGav: state.queuesGav,
-      queuesSgav: state.queuesSgav,
-      timeSeries: state.timeSeries,
-      schedulesMap: state.schedulesMap,
-      savedAt: new Date().toISOString()
-    };
-    localStorage.setItem(STORAGE_KEYS.CACHED_DATA, JSON.stringify(cachePayload));
-    localStorage.setItem(STORAGE_KEYS.LAST_UPDATE, new Date().toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' }));
+    // Якщо API повернуло порожнечу (наприклад відсутній зв'язок з бекендом), завантажуємо кеш або фікстуру
+    if (!state.queuesGpv.length || !state.timeSeries.length) {
+      console.warn('[PWA] Неповні дані від API, підключаємо резервний офлайн-кеш');
+      loadFromOfflineCache();
+    } else {
+      // Зберігаємо свіжі дані в LocalStorage як надійний офлайн-кеш
+      const cachePayload = {
+        queuesGpv: state.queuesGpv,
+        queuesGav: state.queuesGav,
+        queuesSgav: state.queuesSgav,
+        timeSeries: state.timeSeries,
+        schedulesMap: state.schedulesMap,
+        savedAt: new Date().toISOString()
+      };
+      localStorage.setItem(STORAGE_KEYS.CACHED_DATA, JSON.stringify(cachePayload));
+      localStorage.setItem(STORAGE_KEYS.LAST_UPDATE, new Date().toLocaleTimeString('uk-UA', { hour: '2-digit', minute: '2-digit' }));
+    }
 
     updateOfflineNoticeTime();
   } catch (err) {
@@ -336,7 +350,14 @@ function buildSchedulesMap(data) {
   const todayLabel = formatDate(today);
 
   data.forEach(item => {
-    const d = new Date(item.from);
+    // Враховуємо часовий пояс: item.from у форматі UTC (наприклад 2026-11-03T22:00:00Z відповідає 04.11 за Києвом).
+    // Беремо середину між from та to, щоб отримати дату саме активного дня графіка
+    let d;
+    if (item.from && item.to) {
+      d = new Date((new Date(item.from).getTime() + new Date(item.to).getTime()) / 2);
+    } else {
+      d = new Date(item.from || item.to || Date.now());
+    }
     const label = formatDate(d);
 
     if (!map[label]) {
@@ -360,7 +381,14 @@ function buildSchedulesMap(data) {
   }
 
   state.schedulesMap = map;
-  if (!state.selectedDateLabel || !map[state.selectedDateLabel]) {
+  
+  // Якщо для сьогодні серія порожня, але є серія для іншої дати - вибираємо дату з даними
+  const datesWithData = Object.keys(map).filter(k => map[k].series && map[k].series.length > 0);
+  if (map[todayLabel] && map[todayLabel].series && map[todayLabel].series.length > 0) {
+    state.selectedDateLabel = todayLabel;
+  } else if (datesWithData.length > 0) {
+    state.selectedDateLabel = datesWithData[0];
+  } else {
     state.selectedDateLabel = todayLabel;
   }
   renderDayTabs();
@@ -580,16 +608,137 @@ function updateHeroStatus() {
     const timeStr = hours > 0 ? `${hours} год ${mins} хв` : `${mins} хв`;
     const actionStr = nextChangeSlot.type === 'ENABLE' ? 'Увімкнення світла' : 'Вимкнення світла';
     nextEventEl.textContent = `${actionStr} о ${nextChangeSlot.slot.start.slice(0, 5)} (через ${timeStr})`;
+
+    // ПОПЕРЕДЖЕННЯ ЗА 1 ГОДИНУ ТА ЗА 10 ХВИЛИН ДО ВІДКЛЮЧЕННЯ
+    if (nextChangeSlot.type !== 'ENABLE' && diffMins > 0) {
+      if (diffMins <= 60 && diffMins > 15) {
+        checkAndSendPreOutageWarning(nextChangeSlot, 60);
+      } else if (diffMins <= 10) {
+        checkAndSendPreOutageWarning(nextChangeSlot, 10);
+      }
+    }
   } else {
     nextEventEl.textContent = 'Змін до кінця поточної доби не заплановано';
+  }
+
+  // Відправка браузерного сповіщення та звукового сигналу при фактичній зміні стану
+  if (lastNotifiedStatus && lastNotifiedStatus !== currentStatus) {
+    const isPowerOn = currentStatus === 'ENABLE';
+    playStatusSound(isPowerOn);
+
+    const title = isPowerOn ? '💡 Світло знову є!' : '🔌 Світло вимкнено за графіком';
+    const body = `Черга ${state.myQueue.name}: поточний стан змінився на "${textEl.textContent}".`;
+    sendSystemNotification(title, body);
+  }
+  lastNotifiedStatus = currentStatus;
+}
+
+/**
+ * Перевірка та відправка попередження за 1 годину (або за 10 хв) до відключення
+ */
+function checkAndSendPreOutageWarning(nextSlot, warningType) {
+  if (!state.myQueue) return;
+  const todayLabel = formatDate(new Date());
+  const notifKey = `notif_${warningType}m_${todayLabel}_${state.myQueue.id}_${nextSlot.slot.id}`;
+
+  // Уникаємо повторних сповіщень для того самого інтервалу
+  if (sessionStorage.getItem(notifKey)) {
+    return;
+  }
+
+  sessionStorage.setItem(notifKey, 'true');
+
+  const timeLabel = nextSlot.slot.start.slice(0, 5);
+  let title = '';
+  let body = '';
+
+  if (warningType === 60) {
+    title = `⏳ Черга ${state.myQueue.name}: відключення через 1 годину!`;
+    body = `О ${timeLabel} заплановано відключення світла. Залишилась 1 година — час підзарядити пристрої та завершити справи! 🔋`;
+  } else {
+    title = `⚠️ Черга ${state.myQueue.name}: відключення через 10 хвилин!`;
+    body = `О ${timeLabel} світло буде вимкнено за графіком. Будь ласка, збережіть важливі файли!`;
+  }
+
+  // Звуковий сигнал і вібрація
+  playWarningBeep();
+  if (navigator.vibrate) {
+    navigator.vibrate([300, 100, 300, 100, 300]);
+  }
+
+  sendSystemNotification(title, body);
+}
+
+/**
+ * Відтворення аудіосигналу попередження через Web Audio API
+ */
+function playWarningBeep() {
+  try {
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContext) return;
+    const ctx = new AudioContext();
+
+    const playTone = (freq, start, duration) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(freq, ctx.currentTime + start);
+      gain.gain.setValueAtTime(0.25, ctx.currentTime + start);
+      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + start + duration);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(ctx.currentTime + start);
+      osc.stop(ctx.currentTime + start + duration);
+    };
+
+    // Подвійний тривожний сигнал
+    playTone(880, 0, 0.18);
+    playTone(660, 0.22, 0.28);
+  } catch (_) {}
+}
+
+/**
+ * Універсальна відправка системного сповіщення (через Service Worker або Web Notifications)
+ */
+async function sendSystemNotification(title, body) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') {
+    return;
+  }
+
+  try {
+    if ('serviceWorker' in navigator) {
+      const reg = await navigator.serviceWorker.ready;
+      if (reg && reg.showNotification) {
+        return reg.showNotification(title, {
+          body,
+          icon: './icons/icon-192.png',
+          badge: './icons/icon-192.png',
+          vibrate: [300, 100, 300],
+          data: { url: './' }
+        });
+      }
+    }
+  } catch (err) {
+    console.warn('Помилка Service Worker сповіщення, використовуємо fallback:', err);
+  }
+
+  try {
+    new Notification(title, {
+      body,
+      icon: './icons/icon-192.png'
+    });
+  } catch (e) {
+    console.warn('Notification error:', e);
   }
 }
 
 /**
- * Рендеринг 48-сегментної шкали на головній сторінці
+ * Рендеринг 48-сегментної шкали на головній сторінці та підрахунок годин
  */
 function renderHomeTimeline() {
   const container = document.getElementById('homeTimeline');
+  const lightHoursEl = document.getElementById('summaryLightHours');
+  const darkHoursEl = document.getElementById('summaryDarkHours');
   if (!container || !state.timeSeries.length) return;
 
   const now = new Date();
@@ -605,6 +754,9 @@ function renderHomeTimeline() {
     });
   }
 
+  let lightSlots = 0;
+  let darkSlots = 0;
+
   container.innerHTML = state.timeSeries.map(slot => {
     const [sH, sM] = slot.start.split(':').map(Number);
     const [eH, eM] = slot.end.split(':').map(Number);
@@ -617,14 +769,62 @@ function renderHomeTimeline() {
     if (state.myQueue) {
       const key = `${state.myQueue.id}_${slot.id}`;
       const type = scheduleMatrix[key] || 'ENABLE';
-      if (type === 'OFF') typeClass = 'item-off';
-      if (type === 'SURE_OFF') typeClass = 'item-sure-off';
-      if (type === 'PROBABLY_OFF') typeClass = 'item-probably';
+      if (type === 'OFF') { typeClass = 'item-off'; darkSlots++; }
+      else if (type === 'SURE_OFF') { typeClass = 'item-sure-off'; darkSlots++; }
+      else if (type === 'PROBABLY_OFF') { typeClass = 'item-probably'; }
+      else { lightSlots++; }
+    } else {
+      lightSlots++;
     }
 
     return `<div class="timeline-slot ${typeClass} ${isCurrent ? 'current-hour item-active' : ''}" 
                  title="${slot.start.slice(0, 5)} - ${slot.end.slice(0, 5)}"></div>`;
   }).join('');
+
+  if (lightHoursEl && darkHoursEl) {
+    const lightHours = (lightSlots * 0.5).toFixed(1).replace('.0', '');
+    const darkHours = (darkSlots * 0.5).toFixed(1).replace('.0', '');
+    lightHoursEl.textContent = `💡 Світло: ${lightHours} год`;
+    darkHoursEl.textContent = `🔌 Відключення: ${darkHours} год`;
+  }
+}
+
+/**
+ * Приємний звуковий сигнал зміни стану через Web Audio API (без зовнішніх аудіофайлів)
+ */
+function playStatusSound(isPowerOn) {
+  try {
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContext) return;
+    const ctx = new AudioContext();
+
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    osc.type = 'sine';
+    const now = ctx.currentTime;
+
+    if (isPowerOn) {
+      // Підвищений оптимістичний акорд при увімкненні світла (C5 -> E5)
+      osc.frequency.setValueAtTime(523.25, now);
+      osc.frequency.exponentialRampToValueAtTime(659.25, now + 0.15);
+    } else {
+      // М'який затихаючий тон при вимкненні (E5 -> C5)
+      osc.frequency.setValueAtTime(659.25, now);
+      osc.frequency.exponentialRampToValueAtTime(523.25, now + 0.2);
+    }
+
+    gain.gain.setValueAtTime(0.12, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    osc.start(now);
+    osc.stop(now + 0.36);
+  } catch (_) {
+    // Ігноруємо якщо браузер блокує звук до взаємодії
+  }
 }
 
 /* ==========================================================================
@@ -1167,5 +1367,287 @@ async function loadTestFixtureData() {
     console.log('[PWA] Тестовий набір test.json завантажено.');
   } catch (err) {
     console.error('Помилка завантаження test.json:', err);
+  }
+}
+
+/* ==========================================================================
+   7. МУЛЬТИ-ЛОКАЦІЇ ТА ЕКСПОРТ У КАЛЕНДАР (.ICS)
+   ========================================================================== */
+
+const LOCATIONS_STORAGE_KEY = 'lightmk_saved_locations';
+
+function initMultiLocations() {
+  const modal = document.getElementById('saveLocationModal');
+  const btnOpenModal = document.getElementById('btnSaveCurrentLocationModal');
+  const btnCloseModal = document.getElementById('btnCloseLocationModal');
+  const btnConfirm = document.getElementById('btnConfirmSaveLocation');
+  const nameInput = document.getElementById('locationNameInput');
+
+  if (btnOpenModal && modal) {
+    btnOpenModal.addEventListener('click', () => {
+      if (!state.myQueue) {
+        alert('Спочатку оберіть або вкажіть чергу!');
+        return;
+      }
+      nameInput.value = '';
+      modal.classList.remove('hidden');
+      nameInput.focus();
+    });
+
+    btnCloseModal.addEventListener('click', () => modal.classList.add('hidden'));
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) modal.classList.add('hidden');
+    });
+
+    btnConfirm.addEventListener('click', () => {
+      const name = nameInput.value.trim() || `Черга ${state.myQueue.name}`;
+      saveLocation(name, state.myQueue);
+      modal.classList.add('hidden');
+      renderLocationChips();
+    });
+  }
+
+  renderLocationChips();
+}
+
+function getSavedLocations() {
+  try {
+    return JSON.parse(localStorage.getItem(LOCATIONS_STORAGE_KEY)) || [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function saveLocation(name, queue) {
+  const list = getSavedLocations();
+  const existingIdx = list.findIndex(loc => loc.name.toLowerCase() === name.toLowerCase());
+  if (existingIdx > -1) {
+    list[existingIdx].queue = queue;
+  } else {
+    list.push({ name, queue });
+  }
+  localStorage.setItem(LOCATIONS_STORAGE_KEY, JSON.stringify(list));
+}
+
+window.deleteLocation = function(index, event) {
+  if (event) event.stopPropagation();
+  const list = getSavedLocations();
+  list.splice(index, 1);
+  localStorage.setItem(LOCATIONS_STORAGE_KEY, JSON.stringify(list));
+  renderLocationChips();
+};
+
+function renderLocationChips() {
+  const container = document.getElementById('savedLocationsBar');
+  if (!container) return;
+
+  const list = getSavedLocations();
+  if (!list.length) {
+    container.classList.add('hidden');
+    container.innerHTML = '';
+    return;
+  }
+
+  container.classList.remove('hidden');
+  container.innerHTML = list.map((loc, idx) => {
+    const isCurrent = state.myQueue && state.myQueue.id === loc.queue.id;
+    return `
+      <div class="chip-btn ${isCurrent ? 'selected' : ''}" style="display:inline-flex; align-items:center; gap:6px; cursor:pointer;" onclick="selectMyQueueDirect(${loc.queue.id}, '${loc.queue.name}')">
+        <span>📍 ${loc.name} (${loc.queue.name})</span>
+        <span onclick="deleteLocation(${idx}, event)" style="opacity:0.7; font-weight:bold; padding:0 2px;" title="Видалити">&times;</span>
+      </div>
+    `;
+  }).join('');
+}
+
+/**
+ * Експорт графіку відключень у формат iCalendar (.ics)
+ */
+function initCalendarExport() {
+  const btnExport = document.getElementById('btnExportCalendar');
+  if (!btnExport) return;
+
+  btnExport.addEventListener('click', () => {
+    if (!state.myQueue) {
+      alert('Будь ласка, спочатку оберіть вашу чергу для експорту в календар!');
+      return;
+    }
+
+    const activeSchedule = state.schedulesMap[state.selectedDateLabel];
+    if (!activeSchedule || !state.timeSeries.length) {
+      alert('Дані графіка для обраної дати відсутні.');
+      return;
+    }
+
+    const matrix = {};
+    (activeSchedule.series || []).forEach(item => {
+      matrix[`${item.outage_queue_id}_${item.time_series_id}`] = item.type;
+    });
+
+    // Збираємо слоти з відключеннями (OFF та SURE_OFF)
+    const offIntervals = [];
+    let currentInterval = null;
+
+    state.timeSeries.forEach(slot => {
+      const type = matrix[`${state.myQueue.id}_${slot.id}`];
+      const isOff = type === 'OFF' || type === 'SURE_OFF';
+
+      if (isOff) {
+        if (!currentInterval) {
+          currentInterval = { start: slot.start, end: slot.end };
+        } else {
+          currentInterval.end = slot.end; // об'єднуємо суміжні півгодини
+        }
+      } else {
+        if (currentInterval) {
+          offIntervals.push(currentInterval);
+          currentInterval = null;
+        }
+      }
+    });
+    if (currentInterval) {
+      offIntervals.push(currentInterval);
+    }
+
+    if (!offIntervals.length) {
+      alert(`Для черги ${state.myQueue.name} на дату ${state.selectedDateLabel} відключень немає! Світло буде весь день 💡`);
+      return;
+    }
+
+    // Формуємо .ics файл
+    const [d, m, y] = state.selectedDateLabel.split('.');
+    const pad = (n) => String(n).padStart(2, '0');
+
+    let icsEvents = '';
+    offIntervals.forEach((interval, idx) => {
+      const [sh, sm] = interval.start.split(':');
+      const [eh, em] = interval.end.split(':');
+
+      const dtStart = `${y}${m}${d}T${pad(sh)}${pad(sm)}00`;
+      let dtEnd = `${y}${m}${d}T${pad(eh)}${pad(em)}00`;
+      if (eh === '00' && em === '00') {
+        // Наступна доба о 00:00
+        const nextDay = new Date(Number(y), Number(m) - 1, Number(d) + 1);
+        dtEnd = `${nextDay.getFullYear()}${pad(nextDay.getMonth() + 1)}${pad(nextDay.getDate())}T000000`;
+      }
+
+      icsEvents += `
+BEGIN:VEVENT
+UID:svitlo-${y}${m}${d}-${state.myQueue.name}-${idx}@energy.mk.ua
+DTSTAMP:${dtStart}Z
+DTSTART:${dtStart}
+DTEND:${dtEnd}
+SUMMARY:⚡ Відключення світла (Черга ${state.myQueue.name})
+DESCRIPTION:Планове відключення за графіком Миколаївобленерго: ${interval.start.slice(0, 5)} - ${interval.end.slice(0, 5)}
+BEGIN:VALARM
+TRIGGER:-PT15M
+ACTION:DISPLAY
+DESCRIPTION:Нагадування: через 15 хвилин відключення світла!
+END:VALARM
+END:VEVENT`;
+    });
+
+    const icsContent = `BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Svitlo MK PWA//UA
+CALSCALE:GREGORIAN
+METHOD:PUBLISH
+X-WR-CALNAME:Відключення світла (Черга ${state.myQueue.name})
+${icsEvents}
+END:VCALENDAR`;
+
+    // Завантаження файлу
+    const blob = new Blob([icsContent], { type: 'text/calendar;charset=utf-8' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `svitlo_cherha_${state.myQueue.name}_${d}_${m}.ics`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  });
+}
+
+/* ==========================================================================
+   8. WEB SHARE API ТА БРАУЗЕРНІ СПОВІЩЕННЯ
+   ========================================================================== */
+
+let lastNotifiedStatus = null;
+
+function initShareAndNotifications() {
+  const btnShare = document.getElementById('btnShareSchedule');
+  const btnNotif = document.getElementById('btnToggleNotifications');
+
+  if (btnShare) {
+    btnShare.addEventListener('click', async () => {
+      if (!state.myQueue) {
+        alert('Будь ласка, спочатку оберіть вашу чергу!');
+        return;
+      }
+
+      const statusText = document.getElementById('heroStatusText')?.textContent || '';
+      const nextChangeText = document.getElementById('heroNextChange')?.textContent || '';
+      const shareData = {
+        title: `Світло МК — Черга ${state.myQueue.name}`,
+        text: `⚡ Статус по черзі ${state.myQueue.name} (Миколаїв):\n• Зараз: ${statusText}\n• Очікується: ${nextChangeText}\n\nПереглянути повний графік:`,
+        url: window.location.href
+      };
+
+      if (navigator.share) {
+        try {
+          await navigator.share(shareData);
+        } catch (_) {
+          // Користувач скасував діалог
+        }
+      } else {
+        // Fallback: копіюємо в буфер обміну
+        navigator.clipboard.writeText(`${shareData.text} ${shareData.url}`).then(() => {
+          alert('Текст графіка успішно скопійовано в буфер обміну! Можна надіслати у Viber або Telegram.');
+        });
+      }
+    });
+  }
+
+  if (btnNotif) {
+    const updateBtnText = () => {
+      if ('Notification' in window && Notification.permission === 'granted') {
+        btnNotif.textContent = '🔔 Сповіщення за 1 год (Активні)';
+        btnNotif.style.opacity = '1';
+      } else {
+        btnNotif.textContent = '🔔 Увімкнути сповіщення за 1 год';
+      }
+    };
+    updateBtnText();
+
+    btnNotif.addEventListener('click', async () => {
+      if (!('Notification' in window)) {
+        alert('Ваш браузер не підтримує системні сповіщення.');
+        return;
+      }
+
+      if (Notification.permission === 'granted') {
+        // Пропонуємо тестове сповіщення
+        if (confirm('Сповіщення вже увімкнені!\n\nБажаєте надіслати тестове попередження за 1 годину, щоб перевірити звук, вібрацію та пуш?')) {
+          playWarningBeep();
+          if (navigator.vibrate) navigator.vibrate([300, 100, 300]);
+          sendSystemNotification(
+            '⏳ Світло МК: Відключення через 1 годину! (Тест)',
+            'Це перевірка. Залишилась 1 година до відключення — час підзарядити телефони та завершити термінові справи!'
+          );
+        }
+        return;
+      }
+
+      const permission = await Notification.requestPermission();
+      if (permission === 'granted') {
+        updateBtnText();
+        playWarningBeep();
+        sendSystemNotification(
+          '🔔 Сповіщення активовано!',
+          'Світло МК обов\'язково попередить вас за 1 годину до планового відключення!'
+        );
+      } else {
+        alert('Дозвіл на сповіщення відхилено в налаштуваннях браузера.');
+      }
+    });
   }
 }

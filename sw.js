@@ -4,7 +4,7 @@
  * та перехоплення/кешування запитів до API графіків відключень.
  */
 
-const CACHE_NAME = 'energy-mk-cache-v6';
+const CACHE_NAME = 'energy-mk-cache-v12';
 
 // Ресурси оболонки додатку (App Shell)
 const STATIC_ASSETS = [
@@ -85,8 +85,9 @@ self.addEventListener('fetch', (event) => {
             console.log('[SW] Отримано API з кешу (offline):', request.url);
             return cachedResponse;
           }
-          // Якщо навіть у кеші немає, повертаємо порожній JSON або помилку
+          // Якщо навіть у кеші немає, повертаємо статус 503 для коректного спрацювання fallback
           return new Response(JSON.stringify({ error: 'offline', cached: false }), {
+            status: 503,
             headers: { 'Content-Type': 'application/json' }
           });
         })
@@ -113,6 +114,23 @@ self.addEventListener('fetch', (event) => {
       });
 
       return cachedResponse || fetchPromise;
+    })
+  );
+});
+
+// Обробка кліку по системному сповіщенню
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  event.waitUntil(
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+      for (const client of clientList) {
+        if (client.url && 'focus' in client) {
+          return client.focus();
+        }
+      }
+      if (clients.openWindow) {
+        return clients.openWindow('./');
+      }
     })
   );
 });

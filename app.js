@@ -4,11 +4,9 @@
  */
 
 // Базовий URL для API
-// Якщо додаток запущено локально (наприклад через наш server.py) - використовуємо відносні шляхи /api/...
-// що знімає будь-які блокування CORS браузера.
-const IS_LOCAL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.hostname.startsWith('192.168.');
-const API_BASE = IS_LOCAL ? '' : 'https://off.energy.mk.ua';
-const CORS_PROXY = 'https://api.allorigins.win/raw?url=';
+// Використовуємо відносні шляхи /api/...
+// Локально їх проксує server.py, у хмарі (Vercel) їх проксує api/[...path].js
+const API_BASE = '';
 
 // Ключі сховища LocalStorage
 const STORAGE_KEYS = {
@@ -308,35 +306,19 @@ async function loadAllData(forced = false) {
 }
 
 /**
- * Універсальний запит до API з автоматичним резервним проксі при CORS блокуванні
+ * Універсальний запит до API через внутрішній проксі
  */
 async function fetchApi(endpoint) {
   const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
-  let primaryUrl = `${API_BASE}${cleanEndpoint}`;
+  const url = `${API_BASE}${cleanEndpoint}`;
 
-  try {
-    const response = await fetch(primaryUrl, {
-      headers: { 'Accept': 'application/json' }
-    });
-    if (!response.ok) {
-      throw new Error(`HTTP error ${response.status} for ${primaryUrl}`);
-    }
-    return await response.json();
-  } catch (err) {
-    // Якщо прямий запит заблоковано CORS браузера на статичному хостингу — пробуємо через публічний CORS-проксі
-    if (!IS_LOCAL) {
-      try {
-        const proxyUrl = `${CORS_PROXY}${encodeURIComponent('https://off.energy.mk.ua' + cleanEndpoint)}`;
-        const fallbackRes = await fetch(proxyUrl);
-        if (fallbackRes.ok) {
-          return await fallbackRes.json();
-        }
-      } catch (_) {
-        // ігноруємо помилку проксі і переходимо до кешу
-      }
-    }
-    throw err;
+  const response = await fetch(url, {
+    headers: { 'Accept': 'application/json' }
+  });
+  if (!response.ok) {
+    throw new Error(`HTTP error ${response.status} for ${url}`);
   }
+  return await response.json();
 }
 
 /**

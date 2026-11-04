@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#104c8c">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Світло МК">
+  <meta name="description" content="Графіки відключень світла Миколаївобленерго - мобільний офлайн PWA-додаток">
+
+  <title>Світло Миколаїв | Графіки відключень</title>
+
+  <!-- PWA Manifest & Icons -->
+  <link rel="manifest" href="./manifest.json">
+  <link rel="icon" type="image/svg+xml" href="./icons/icon.svg">
+  <link rel="apple-touch-icon" href="./icons/icon-192.png">
+
+  <!-- Stylesheet -->
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <!-- Header / Верхня панель -->
+  <header class="app-header">
+    <div class="header-inner container">
+      <div class="brand">
+        <svg class="brand-logo" viewBox="0 0 512 512" width="32" height="32">
+          <use href="./icons/icon.svg#boltGrad"></use>
+          <path d="M280 80 L160 272 H260 L232 432 L368 240 H268 Z" fill="#FACC15"/>
+        </svg>
+        <div class="brand-text">
+          <span class="brand-title">Світло МК</span>
+          <span class="brand-subtitle">Миколаївобленерго</span>
+        </div>
+      </div>
+
+      <div class="header-actions">
+        <!-- Індикатор онлайн/офлайн -->
+        <div id="connectionStatus" class="status-pill status-online" title="Стан мережі">
+          <span class="status-dot"></span>
+          <span class="status-text">Онлайн</span>
+        </div>
+
+        <!-- Кнопка оновлення даних -->
+        <button id="btnRefresh" class="icon-btn" title="Оновити графіки" aria-label="Оновити дані">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.19"/>
+          </svg>
+        </button>
+
+        <!-- Кнопка встановлення PWA (з'являється автоматично) -->
+        <button id="btnInstallPwa" class="btn btn-sm btn-install hidden" aria-label="Встановити додаток">
+          ⬇ Встановити
+        </button>
+      </div>
+    </div>
+
+    <!-- Десктопне меню навігації -->
+    <nav class="nav-desktop container">
+      <button class="nav-tab active" data-tab="tab-home">
+        <span class="tab-icon">⚡</span> Головна
+      </button>
+      <button class="nav-tab" data-tab="tab-schedule">
+        <span class="tab-icon">📅</span> Розклад (ГПВ)
+      </button>
+      <button class="nav-tab" data-tab="tab-address">
+        <span class="tab-icon">🏠</span> Мій адрес / Черга
+      </button>
+      <button class="nav-tab" data-tab="tab-info">
+        <span class="tab-icon">ℹ️</span> Контакти & Довідка
+      </button>
+    </nav>
+  </header>
+
+  <!-- Головний контейнер з вкладками SPA -->
+  <main class="main-content container">
+
+    <!-- Банер офлайн / Кешовані дані -->
+    <div id="offlineNotice" class="alert alert-warning hidden" role="alert">
+      <span class="alert-icon">⚠️</span>
+      <div class="alert-content">
+        <strong>Офлайн-режим:</strong> Відображаються останні збережені графіки від <span id="lastUpdatedTime">-</span>.
+      </div>
+    </div>
+
+    <!-- 1. ВКЛАДКА: ГОЛОВНА (ОГЛЯД) -->
+    <section id="tab-home" class="spa-page active">
+      <!-- Картка моєї черги (якщо обрана або швидкий вибір) -->
+      <div class="card card-hero">
+        <div class="card-hero-header">
+          <div class="hero-left">
+            <span class="tag-badge">Ваша обрана черга</span>
+            <h2 id="heroQueueName" class="hero-queue">Не вибрано</h2>
+            <p id="heroAddressSubtitle" class="hero-sub">Вкажіть адресу або оберіть чергу вручну</p>
+          </div>
+          <div id="heroStatusBadge" class="hero-badge badge-unknown">
+            <span id="heroStatusIcon" class="hero-icon">❓</span>
+            <span id="heroStatusText">Немає даних</span>
+          </div>
+        </div>
+
+        <div class="card-hero-body">
+          <div class="hero-time-box">
+            <span class="label">Поточний час:</span>
+            <span id="liveClock" class="clock-display">--:--:--</span>
+          </div>
+          <div class="hero-next-event">
+            <span class="label">Очікується:</span>
+            <span id="heroNextChange" class="next-change-text">Оберіть чергу для відстеження</span>
+          </div>
+        </div>
+
+        <div class="card-hero-footer">
+          <button id="btnQuickSelectQueue" class="btn btn-outline-light btn-sm">
+            ⚡ Швидка зміна черги
+          </button>
+          <button id="btnGoToSchedule" class="btn btn-light btn-sm">
+            Детальний розклад →
+          </button>
+        </div>
+      </div>
+
+      <!-- Аварійні відключення (ГАВ / СГАВ) -->
+      <div class="card">
+        <div class="card-header-flex">
+          <div>
+            <h3 class="card-title">🚨 Стан аварійних відключень (ГАВ / СГАВ)</h3>
+            <p class="card-desc">Графіки аварійного відключення діють за спеціальним розпорядженням НЕК «Укренерго»</p>
+          </div>
+          <span id="gavOverallStatus" class="badge badge-success">ГАВ не діє</span>
+        </div>
+
+        <!-- Очереди ГАВ -->
+        <div class="emergency-section">
+          <div class="emergency-label">Черги ГАВ:</div>
+          <div id="gavList" class="emergency-pills">
+            <span class="loading-text">Завантаження даних...</span>
+          </div>
+        </div>
+
+        <!-- Очереди СГАВ -->
+        <div class="emergency-section">
+          <div class="emergency-label">Черги СГАВ:</div>
+          <div id="sgavList" class="emergency-pills">
+            <span class="loading-text">Завантаження даних...</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Швидкий таймлайн на сьогодні для моєї черги -->
+      <div class="card">
+        <h3 class="card-title">⏱ Сьогоднішня шкала відключень</h3>
+        <p class="card-desc">Розклад на 24 години з 30-хвилинними блоками</p>
+        <div id="homeTimeline" class="timeline-bar">
+          <!-- 48 сегментів генеруються JS -->
+        </div>
+        <div class="timeline-legend-compact">
+          <span class="legend-item"><span class="dot dot-enable"></span> Світло є</span>
+          <span class="legend-item"><span class="dot dot-off"></span> Відключення</span>
+          <span class="legend-item"><span class="dot dot-probably"></span> Можливе</span>
+          <span class="legend-item"><span class="dot dot-sure-off"></span> Точне</span>
+        </div>
+      </div>
+    </section>
+
+
+    <!-- 2. ВКЛАДКА: РОЗКЛАД (ГРАФІКИ ГПВ) -->
+    <section id="tab-schedule" class="spa-page">
+      <div class="card">
+        <div class="schedule-controls">
+          <!-- Вибір дня -->
+          <div class="control-group">
+            <label class="control-label">Дата:</label>
+            <div id="scheduleDaysTabs" class="btn-group day-pills">
+              <!-- Кнопки дат генеруються JS -->
+              <button class="btn btn-pill active">Сьогодні</button>
+            </div>
+          </div>
+
+          <!-- Режим відображення -->
+          <div class="control-group">
+            <label class="control-label">Вигляд:</label>
+            <div class="btn-group">
+              <button id="viewBtnCards" class="btn btn-pill active">Картки (Мобільний)</button>
+              <button id="viewBtnTable" class="btn btn-pill">Таблиця (Сітка)</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Фільтр черг -->
+        <div class="queue-filter-bar">
+          <div class="filter-header">
+            <span class="control-label">Фільтр черг:</span>
+            <div class="filter-shortcuts">
+              <button id="filterSelectAll" class="btn-link">Усі</button>
+              <span class="sep">|</span>
+              <button id="filterSelectMy" class="btn-link">Моя черга</button>
+              <span class="sep">|</span>
+              <button id="filterClear" class="btn-link">Очистити</button>
+            </div>
+          </div>
+          <div id="queueFilterPills" class="queue-chips">
+            <!-- Чіпи 1.1 - 6.2 генеруються динамічно -->
+          </div>
+        </div>
+
+        <!-- Легенда кольорів -->
+        <div class="color-legend">
+          <div class="legend-chip item-enable"><span>Є світло</span></div>
+          <div class="legend-chip item-off"><span>Відключення</span></div>
+          <div class="legend-chip item-sure-off"><span>Актуальне відключення</span></div>
+          <div class="legend-chip item-probably"><span>Можливе відключення</span></div>
+          <div class="legend-chip legend-active"><span>Зараз діє</span></div>
+        </div>
+      </div>
+
+      <!-- Контейнер відображення графіка: Режим Картки (мобільний оптимізований) -->
+      <div id="scheduleCardsContainer" class="schedule-cards-view">
+        <!-- Картки генеруються JS -->
+      </div>
+
+      <!-- Контейнер відображення графіка: Режим Таблиця -->
+      <div id="scheduleTableContainer" class="schedule-table-view hidden">
+        <div class="table-responsive">
+          <table class="tabSchedule" id="fullScheduleTable">
+            <thead id="scheduleTableHead"></thead>
+            <tbody id="scheduleTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+
+    <!-- 3. ВКЛАДКА: АДРЕСА & ПОШУК ЧЕРГИ -->
+    <section id="tab-address" class="spa-page">
+      <div class="card">
+        <h3 class="card-title">🔍 Дізнатися чергу за адресою</h3>
+        <p class="card-desc">Виберіть вашу філію, населений пункт, вулицю та будинок із бази Миколаївобленерго</p>
+
+        <form id="addressSearchForm" class="address-form" onsubmit="return false;">
+          <!-- Філія -->
+          <div class="form-group">
+            <label for="selectFilial" class="form-label">1. Філія / Район:</label>
+            <select id="selectFilial" class="form-select">
+              <option value="">Оберіть філію...</option>
+            </select>
+          </div>
+
+          <!-- Населений пункт -->
+          <div class="form-group">
+            <label for="selectNaspunkt" class="form-label">2. Населений пункт:</label>
+            <select id="selectNaspunkt" class="form-select" disabled>
+              <option value="">Спочатку оберіть філію...</option>
+            </select>
+          </div>
+
+          <!-- Вулиця -->
+          <div class="form-group">
+            <label for="selectStreet" class="form-label">3. Вулиця:</label>
+            <select id="selectStreet" class="form-select" disabled>
+              <option value="">Спочатку оберіть населений пункт...</option>
+            </select>
+          </div>
+
+          <!-- Будинок -->
+          <div class="form-group">
+            <label for="selectDom" class="form-label">4. Номер будинку:</label>
+            <select id="selectDom" class="form-select" disabled>
+              <option value="">Спочатку оберіть вулицю...</option>
+            </select>
+          </div>
+
+          <div class="form-actions">
+            <button id="btnCheckAddress" class="btn btn-primary" disabled>
+              Знайти відключення
+            </button>
+            <button id="btnResetAddress" class="btn btn-outline" type="button">
+              Скинути
+            </button>
+          </div>
+        </form>
+
+        <!-- Результат пошуку адреси -->
+        <div id="addressResultCard" class="result-box hidden">
+          <h4>Знайдена інформація:</h4>
+          <div id="addressResultContent"></div>
+          <button id="btnSaveMyAddress" class="btn btn-success btn-sm mt-3">
+            ⭐ Зберегти як мою основну адресу
+          </button>
+        </div>
+      </div>
+
+      <!-- Прямий вибір черги без адреси -->
+      <div class="card">
+        <h3 class="card-title">⚡ Або оберіть чергу вручну</h3>
+        <p class="card-desc">Якщо ви вже знаєте номер своєї черги (наприклад, 1.2 або 4.1), просто виберіть її нижче:</p>
+        <div id="manualQueueSelector" class="queue-chips-large">
+          <!-- Кнопки черг 1.1 - 6.2 -->
+        </div>
+      </div>
+    </section>
+
+
+    <!-- 4. ВКЛАДКА: ІНФОРМАЦІЯ & КОНТАКТИ -->
+    <section id="tab-info" class="spa-page">
+      <div class="card">
+        <h3 class="card-title">📞 Контакти АТ «Миколаївобленерго»</h3>
+        <p class="card-desc">Офіційні канали зв'язку та гарячі лінії підприємства:</p>
+
+        <ul class="contact-list">
+          <li class="contact-item">
+            <span class="contact-icon">📞</span>
+            <div class="contact-info">
+              <strong>Колл-центр (безкоштовно по Україні):</strong>
+              <a href="tel:0800504001" class="contact-link">0 800 504 001</a>
+            </div>
+          </li>
+          <li class="contact-item">
+            <span class="contact-icon">☎️</span>
+            <div class="contact-info">
+              <strong>Міський номер Миколаєва:</strong>
+              <a href="tel:0512530661" class="contact-link">(0512) 53-06-61</a>
+            </div>
+          </li>
+          <li class="contact-item">
+            <span class="contact-icon">🌐</span>
+            <div class="contact-info">
+              <strong>Офіційний сайт графіків:</strong>
+              <a href="https://off.energy.mk.ua/" target="_blank" rel="noopener" class="contact-link">off.energy.mk.ua</a>
+            </div>
+          </li>
+          <li class="contact-item">
+            <span class="contact-icon">💬</span>
+            <div class="contact-info">
+              <strong>Форма зворотного зв'язку:</strong>
+              <a href="https://forms.gle/2iZP6Y2sUxp3dLWZA" target="_blank" rel="noopener" class="contact-link">Google Форма відгуків</a>
+            </div>
+          </li>
+        </ul>
+      </div>
+
+      <!-- Офіційні документи PDF -->
+      <div class="card">
+        <h3 class="card-title">📑 Офіційні списки та черги (PDF)</h3>
+        <div class="pdf-links">
+          <a href="https://off.energy.mk.ua/Chergi_GPV.pdf" target="_blank" rel="noopener" class="pdf-btn">
+            📥 Список адрес та черги ГПВ (PDF)
+          </a>
+          <a href="https://off.energy.mk.ua/Chergi_GAV.pdf" target="_blank" rel="noopener" class="pdf-btn">
+            📥 Черги аварійних відключень ГАВ (PDF)
+          </a>
+        </div>
+      </div>
+
+      <!-- Розділ діагностики, тестів та PWA кешу -->
+      <div class="card">
+        <h3 class="card-title">⚙️ Налаштування & Тестові дані</h3>
+        <p class="card-desc">Керування збереженим кешем та перевірка тестового маніфесту (test.json)</p>
+        <div class="btn-group-column">
+          <button id="btnLoadTestFixture" class="btn btn-outline">
+            🧪 Завантажити тестовий набір даних (test.json)
+          </button>
+          <button id="btnClearSavedData" class="btn btn-outline text-danger">
+            🗑 Очистити збережену адресу та кеш LocalStorage
+          </button>
+        </div>
+        <div class="app-version-info">
+          <span>Світло Миколаїв PWA v1.0.0</span>
+          <span>Автономна підтримка Service Worker активна</span>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Нижня мобільна панель навігації (Bottom Navigation Bar) -->
+  <nav class="nav-bottom">
+    <button class="nav-btn active" data-tab="tab-home">
+      <span class="nav-icon">⚡</span>
+      <span class="nav-label">Головна</span>
+    </button>
+    <button class="nav-btn" data-tab="tab-schedule">
+      <span class="nav-icon">📅</span>
+      <span class="nav-label">Розклад</span>
+    </button>
+    <button class="nav-btn" data-tab="tab-address">
+      <span class="nav-icon">🏠</span>
+      <span class="nav-label">Адреса</span>
+    </button>
+    <button class="nav-btn" data-tab="tab-info">
+      <span class="nav-icon">ℹ️</span>
+      <span class="nav-label">Інфо</span>
+    </button>
+  </nav>
+
+  <!-- Модальне вікно швидкого вибору черги -->
+  <div id="quickQueueModal" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>Оберіть вашу чергу</h3>
+        <button id="btnCloseModal" class="btn-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="text-muted">Оберіть одну з 12 підчерг графіка погодинних відключень:</p>
+        <div id="modalQueueGrid" class="queue-chips-large"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- JavaScript головного додатка -->
+  <script src="./app.js"></script>
+</body>
+</html>

@@ -355,7 +355,20 @@
       <!-- Розділ діагностики, тестів та PWA кешу -->
       <div class="card">
         <h3 class="card-title">⚙️ Налаштування & Тестові дані</h3>
-        <p class="card-desc">Керування збереженим кешем та перевірка тестового маніфесту (test.json)</p>
+        <p class="card-desc">Керування підключенням до API, збереженим кешем та тестовими даними</p>
+        
+        <!-- Налаштування власного Cloudflare Worker / Проксі -->
+        <div class="form-group mb-3">
+          <label for="customApiInput" class="form-label">🌐 Адреса власного Cloudflare Worker (для автономної роботи 24/7):</label>
+          <div style="display: flex; gap: 8px;">
+            <input type="url" id="customApiInput" class="form-select" placeholder="https://my-proxy.workers.dev" style="flex: 1;">
+            <button id="btnSaveCustomApi" class="btn btn-primary btn-sm">Зберегти</button>
+          </div>
+          <small class="text-muted" style="display: block; margin-top: 4px; font-size: 0.78rem;">
+            Залиште порожнім для використання стандартного підключення.
+          </small>
+        </div>
+
         <div class="btn-group-column">
           <button id="btnLoadTestFixture" class="btn btn-outline">
             🧪 Завантажити тестовий набір даних (test.json)

@@ -4,7 +4,7 @@
  * та перехоплення/кешування запитів до API графіків відключень.
  */
 
-const CACHE_NAME = 'energy-mk-cache-v4';
+const CACHE_NAME = 'energy-mk-cache-v6';
 
 // Ресурси оболонки додатку (App Shell)
 const STATIC_ASSETS = [

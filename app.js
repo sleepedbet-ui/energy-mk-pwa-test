@@ -4,9 +4,15 @@
  */
 
 // Базовий URL для API
-// Використовуємо відносні шляхи /api/...
-// Локально їх проксує server.py, у хмарі (Vercel) їх проксує api/[...path].js
-const API_BASE = '';
+// Пріоритет: 1) збережений користувачем Cloudflare Worker у налаштуваннях; 2) відносний шлях /api/...
+function getApiBase() {
+  const custom = localStorage.getItem('lightmk_custom_api');
+  if (custom && custom.trim()) {
+    return custom.trim().replace(/\/$/, '');
+  }
+  return '';
+}
+let API_BASE = getApiBase();
 
 // Ключі сховища LocalStorage
 const STORAGE_KEYS = {
@@ -1087,6 +1093,24 @@ function displayAddressResult(data) {
    ========================================================================== */
 
 function initDiagnostics() {
+  // Налаштування користувацького проксі (Cloudflare Worker)
+  const apiInput = document.getElementById('customApiInput');
+  const btnSaveApi = document.getElementById('btnSaveCustomApi');
+  if (apiInput && btnSaveApi) {
+    apiInput.value = localStorage.getItem('lightmk_custom_api') || '';
+    btnSaveApi.addEventListener('click', () => {
+      const val = apiInput.value.trim();
+      if (val) {
+        localStorage.setItem('lightmk_custom_api', val);
+      } else {
+        localStorage.removeItem('lightmk_custom_api');
+      }
+      API_BASE = getApiBase();
+      alert('Налаштування API успішно збережено! Додаток перезавантажується...');
+      location.reload();
+    });
+  }
+
   // Кнопка завантаження тестового маніфесту test.json
   document.getElementById('btnLoadTestFixture').addEventListener('click', async () => {
     await loadTestFixtureData();
